@@ -963,7 +963,11 @@ class DeleteDecompositionVerifier(InstantaneousActionRobustnessVerifier):
         '''
         Find actions that are not used in any plan
         '''
-
+        for agent in problem.agents:
+            for an_action in agent.actions:
+                new_problem = self.initialize_problem(problem)
+                new_fluent = Fluent("artificial")
+                new_problem.add_fluent(new_fluent)
         return set()
 
     def find_useless_atoms(self, problem, useless_actions) -> Set[Fluent]:
@@ -996,14 +1000,12 @@ class DeleteDecompositionVerifier(InstantaneousActionRobustnessVerifier):
 
 
 
-
-
-    def _compile(self, problem: "up.model.AbstractProblem",
-                 compilation_kind: CompilationKind) -> "up.engines.results.CompilerResult":
-        new_to_old: Dict[Action, Action] = {}
-        new_problem = self.initialize_problem(problem)
-        self.global_fluent_map = FluentMap("w", default_value=False)
-        useless_actions = self.find_useless_actions(problem)
+    # def _compile(self, problem: "up.model.AbstractProblem",
+    #              compilation_kind: CompilationKind) -> "up.engines.results.CompilerResult":
+    #     new_to_old: Dict[Action, Action] = {}
+    #     new_problem = self.initialize_problem(problem)
+    #     self.global_fluent_map = FluentMap("w", default_value=False)
+    #     useless_actions = self.find_useless_actions(problem)
 
 
 """
