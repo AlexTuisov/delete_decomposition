@@ -19,7 +19,7 @@ import unified_planning.engines as engines
 from unified_planning.engines.mixins.compiler import CompilationKind, CompilerMixin
 from unified_planning.model.multi_agent import *
 from unified_planning.model import *
-from unified_planning.engines.results import CompilerResult
+from unified_planning.engines.results import CompilerResult, PlanGenerationResultStatus
 from unified_planning.exceptions import UPExpressionDefinitionError, UPProblemDefinitionError
 from typing import List, Dict, Union, Optional, Set
 from unified_planning.engines.compilers.utils import replace_action, get_fresh_name
@@ -31,6 +31,8 @@ from unified_planning.exceptions import UPProblemDefinitionError
 from unified_planning.model import Problem, InstantaneousAction, DurativeAction, Action
 from typing import List, Dict
 from itertools import product
+
+# from unified_planning.social_law.robustness_checker import SocialLawRobustnessChecker, SocialLawRobustnessStatus
 from unified_planning.social_law.waitfor_specification import WaitforSpecification
 from unified_planning.social_law.ma_problem_waitfor import MultiAgentProblemWithWaitfor
 import unified_planning as up
@@ -46,6 +48,13 @@ credits = Credits('Robustness Verification',
                   'Apache License, Version 2.0',
                   'Creates a planning problem which verifies the robustness of a multi-agent planning problem with given waitfor specification.',
                   'Creates a planning problem which verifies the robustness of a multi-agent planning problem with given waitfor specification.')
+
+POSITIVE_OUTCOMES = frozenset(
+    [
+        PlanGenerationResultStatus.SOLVED_SATISFICING,
+        PlanGenerationResultStatus.SOLVED_OPTIMALLY,
+    ]
+)
 
 
 class FluentMap():
@@ -968,6 +977,16 @@ class DeleteDecompositionVerifier(InstantaneousActionRobustnessVerifier):
                 new_problem = self.initialize_problem(problem)
                 new_fluent = Fluent("artificial")
                 new_problem.add_fluent(new_fluent)
+                new_problem.add_goal(new_fluent)
+                new_action = self.create_action_copy(problem, agent, an_action, "s")
+                new_action.add_precondition(new_fluent)
+                new_problem.add_action(new_action)
+                # slrc = SocialLawRobustnessChecker(
+                #     planner_name="fast-downward",
+                #     robustness_verifier_name="SimpleInstantaneousActionRobustnessVerifier"
+                # )
+                # presult = slrc.solve(problem)
+                # assert presult.status in POSITIVE_OUTCOMES
         return set()
 
     def find_useless_atoms(self, problem, useless_actions) -> Set[Fluent]:
@@ -995,10 +1014,6 @@ class DeleteDecompositionVerifier(InstantaneousActionRobustnessVerifier):
                         for fact in effect:
                             if fact in useless_predicates:
                                 return False
-
-
-
-
 
     # def _compile(self, problem: "up.model.AbstractProblem",
     #              compilation_kind: CompilationKind) -> "up.engines.results.CompilerResult":
@@ -1172,5 +1187,208 @@ class DeleteDecompositionVerifier(InstantaneousActionRobustnessVerifier):
 env = up.environment.get_env()
 env.factory.add_engine('SimpleInstantaneousActionRobustnessVerifier', __name__,
                        'SimpleInstantaneousActionRobustnessVerifier')
+
+
 # env.factory.add_engine('WaitingActionRobustnessVerifier', __name__, 'WaitingActionRobustnessVerifier')
 # env.factory.add_engine('DurativeActionRobustnessVerifier', __name__, 'DurativeActionRobustnessVerifier')
+
+
+def get_intersection_problem(
+        cars=["car-north", "car-south", "car-east", "car-west"],
+        yields_list=[],
+        wait_drive=True,
+        durative=False) -> MultiAgentProblemWithWaitfor:
+    problem = MultiAgentProblemWithWaitfor("intersection")
+
+    loc = UserType("loc")
+    direction = UserType("direction")
+    car = UserType("car")
+
+    # Environment
+    connected = Fluent('connected', BoolType(), l1=loc, l2=loc, d=direction)
+    free = Fluent('free', BoolType(), l=loc)
+    if len(yields_list) > 0:
+        yieldsto = Fluent('yieldsto', BoolType(), l1=loc, l2=loc)
+        problem.ma_environment.add_fluent(yieldsto, default_initial_value=False)
+        dummy_loc = unified_planning.model.Object("dummy", loc)
+        problem.add_object(dummy_loc)
+
+    problem.ma_environment.add_fluent(connected, default_initial_value=False)
+    problem.ma_environment.add_fluent(free, default_initial_value=True)
+
+    intersection_map = {
+        "north": ["south-ent", "cross-se", "cross-ne", "north-ex"],
+        "south": ["north-ent", "cross-nw", "cross-sw", "south-ex"],
+        "west": ["east-ent", "cross-ne", "cross-nw", "west-ex"],
+        "east": ["west-ent", "cross-sw", "cross-se", "east-ex"]
+    }
+
+    location_names = set()
+    for l in intersection_map.values():
+        location_names = location_names.union(l)
+    locations = list(map(lambda l: unified_planning.model.Object(l, loc), location_names))
+    problem.add_objects(locations)
+
+    direction_names = intersection_map.keys()
+    directions = list(map(lambda d: unified_planning.model.Object(d, direction), direction_names))
+    problem.add_objects(directions)
+
+    for d, l in intersection_map.items():
+        for i in range(len(l) - 1):
+            problem.set_initial_value(
+                connected(unified_planning.model.Object(l[i], loc), unified_planning.model.Object(l[i + 1], loc),
+                          unified_planning.model.Object(d, direction)), True)
+
+    # Agents
+    at = Fluent('at', BoolType(), l1=loc)
+    arrived = Fluent('arrived', BoolType())
+    not_arrived = Fluent('not-arrived', BoolType())
+    start = Fluent('start', BoolType(), l=loc)
+    traveldirection = Fluent('traveldirection', BoolType(), d=direction)
+
+    #  (:action arrive
+    #     :agent    ?a - car
+    #     :parameters  (?l - loc)
+    #     :precondition  (and
+    #     	(start ?a ?l)
+    #     	(not (arrived ?a))
+    #     	(free ?l)
+    #       )
+    #     :effect    (and
+    #     	(at ?a ?l)
+    #     	(not (free ?l))
+    #     	(arrived ?a)
+    #       )
+    #   )
+
+    arrive = InstantaneousAction('arrive', l=loc)
+    l = arrive.parameter('l')
+    arrive.add_precondition(start(l))
+    arrive.add_precondition(not_arrived())
+    arrive.add_precondition(free(l))
+    arrive.add_effect(at(l), True)
+    arrive.add_effect(free(l), False)
+    arrive.add_effect(arrived(), True)
+    arrive.add_effect(not_arrived(), False)
+
+    if len(yields_list) > 0:
+        drive = InstantaneousAction('drive', l1=loc, l2=loc, d=direction, ly=loc)
+    else:
+        drive = InstantaneousAction('drive', l1=loc, l2=loc, d=direction)
+    l1 = drive.parameter('l1')
+    l2 = drive.parameter('l2')
+    d = drive.parameter('d')
+    # ly = drive.parameter('ly')
+    drive.add_precondition(at(l1))
+    drive.add_precondition(free(l2))  # Remove for yield/wait
+    drive.add_precondition(traveldirection(d))
+    drive.add_precondition(connected(l1, l2, d))
+    if len(yields_list) > 0:
+        ly = drive.parameter('ly')
+        drive.add_precondition(yieldsto(l1, ly))
+        drive.add_precondition(free(ly))
+    drive.add_effect(at(l2), True)
+    drive.add_effect(free(l2), False)
+    drive.add_effect(at(l1), False)
+    drive.add_effect(free(l1), True)
+
+    plan = up.plans.SequentialPlan([])
+
+    for d, l in intersection_map.items():
+        carname = "car-" + d
+        if carname in cars:
+            car = Agent(carname, problem)
+
+            problem.add_agent(car)
+            car.add_fluent(at, default_initial_value=False)
+            car.add_fluent(arrived, default_initial_value=False)
+            car.add_fluent(not_arrived, default_initial_value=True)
+            car.add_fluent(start, default_initial_value=False)
+            car.add_fluent(traveldirection, default_initial_value=False)
+            car.add_action(arrive)
+            car.add_action(drive)
+
+            slname = l[0]
+            slobj = unified_planning.model.Object(slname, loc)
+
+            glname = l[-1]
+            globj = unified_planning.model.Object(glname, loc)
+
+            dobj = unified_planning.model.Object(d, direction)
+
+            problem.set_initial_value(Dot(car, car.fluent("start")(slobj)), True)
+            problem.set_initial_value(Dot(car, car.fluent("traveldirection")(dobj)), True)
+            problem.add_goal(Dot(car, car.fluent("at")(globj)))
+
+            if len(yields_list) > 0:
+                yields = set()
+                for l1_name, ly_name in yields_list:
+                    problem.set_initial_value(yieldsto(problem.object(l1_name), problem.object(ly_name)), True)
+                    yields.add(problem.object(l1_name))
+                for l1 in problem.objects(loc):
+                    if l1 not in yields:
+                        problem.set_initial_value(yieldsto(l1, dummy_loc), True)
+
+    # Add waitfor annotations
+    for agent in problem.agents:
+        drive = agent.action("drive")
+        l2 = drive.parameter("l2")
+        if wait_drive:
+            problem.waitfor.annotate_as_waitfor(agent.name, drive.name, free(l2))
+        if len(yields_list) > 0:
+            ly = drive.parameter("ly")
+            problem.waitfor.annotate_as_waitfor(agent.name, drive.name, free(ly))
+    return problem
+
+
+def create_grid_problem(length: int, width: int, num_of_agents: int) -> MultiAgentProblemWithWaitfor:
+    problem = MultiAgentProblemWithWaitfor("intersection")
+    loc = UserType("loc")
+
+    connected = Fluent('connected', BoolType(), l1=loc, l2=loc)
+    free = Fluent('free', BoolType(), l=loc)
+    problem.ma_environment.add_fluent(connected, default_initial_value=False)
+    problem.ma_environment.add_fluent(free, default_initial_value=True)
+    for i in range(length):
+        for j in range(width):
+            problem.add_object(unified_planning.model.Object("l" + str(i) + "-" + str(j), loc))
+
+    at = Fluent('at', BoolType(), l1=loc)
+    arrived = Fluent('arrived', BoolType())
+    not_arrived = Fluent('not-arrived', BoolType())
+    start = Fluent('start', BoolType(), l=loc)
+
+
+
+    drive = InstantaneousAction('drive', l1=loc, l2=loc)
+    l1 = drive.parameter('l1')
+    l2 = drive.parameter('l2')
+    drive.add_precondition(at(l1))
+    drive.add_precondition(free(l2))
+    drive.add_effect(at(l2), True)
+    drive.add_effect(free(l2), False)
+    drive.add_effect(at(l1), False)
+    drive.add_effect(free(l1), True)
+
+    for i in range(num_of_agents):
+        robot = Agent(f"robot_{i}", problem)
+        problem.add_agent(robot)
+        goal_location = (length - i - 1, width - i - 1)
+        robot.add_action(drive)
+        starting_location = unified_planning.model.Object("starting-location", (i, i))
+
+        problem.set_initial_value(Dot(robot, robot.fluent("at")(starting_location)), True)
+        problem.add_goal(Dot(robot, robot.fluent("at")(goal_location)))
+
+
+    return problem
+
+
+if __name__ == '__main__':
+    sample_problem = get_intersection_problem()
+    print(sample_problem)
+
+    problem = create_grid_problem(5, 5, 1)
+    print(problem)
+
+
